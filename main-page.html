@@ -253,4 +253,245 @@ window.addEventListener('popstate', function(event) {
   });
   
 </script>
+
+
+
+
+<!-- Paste this <script> near the end of your <body> -->
+<script>
+/* Complete client-side lock + post-unlock protection
+   NOTE: demo admin password = "demo123". Client-side only; bypassable. */
+(function(){
+  const ADMIN_PASS = 'demo123';
+
+  /* ---------- Overlay (lock screen) ---------- */
+  (function createOverlay(){
+    if (document.getElementById('vk_lock_overlay')) return;
+    const css = `
+      #vk_lock_overlay{ position:fixed; inset:0; background:rgba(255,255,255,0.98); z-index:2147483646; display:flex; align-items:center; justify-content:center; user-select:none; -webkit-user-select:none; }
+      #vk_lock_panel{ width:420px; max-width:94%; padding:20px; border-radius:12px; box-shadow:0 10px 40px rgba(0,0,0,0.12); background:#fff; text-align:center; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;}
+      #vk_lock_panel h2{ margin:0 0 6px; font-size:20px; color:#111; }
+      #vk_lock_panel p{ margin:0 0 12px; color:#555; font-size:13px; }
+      #vk_lock_pwd{ width:100%; padding:10px; box-sizing:border-box; margin-top:8px; border-radius:8px; border:1px solid #ddd; font-size:14px }
+      #vk_lock_btn{ margin-top:12px; padding:10px 14px; cursor:pointer; border-radius:8px; border:0; background:#2563eb; color:#fff; font-weight:600; }
+    `;
+    const style = document.createElement('style');
+    style.setAttribute('data-vk-lock','');
+    style.textContent = css;
+    document.head.appendChild(style);
+
+    const overlay = document.createElement('div');
+    overlay.id = 'vk_lock_overlay';
+    overlay.tabIndex = 0;
+    overlay.innerHTML = `
+      <div id="vk_lock_panel" role="dialog" aria-modal="true" aria-label="Site locked">
+        <h2>Site temporarily locked</h2>
+        <p>Enter admin password to unlock the site.</p>
+        <input id="vk_lock_pwd" type="password" autocomplete="off" placeholder="Admin password" />
+        <br/>
+        <button id="vk_lock_btn" type="button">Unlock</button>
+        <p style="font-size:11px;color:#777;margin-top:8px">Client-side protection. For strong protection use server-side checks or kiosk mode.</p>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    setTimeout(()=> overlay.focus(),50);
+  })();
+
+  const overlay = document.getElementById('vk_lock_overlay');
+  const pwdInput = () => document.getElementById('vk_lock_pwd');
+  const unlockBtn = () => document.getElementById('vk_lock_btn');
+
+  /* ---------- Protection logic (post-unlock) ---------- */
+  let protectionEnabled = false;
+  let protectStyleEl = null;
+  let observer = null;
+  let healInterval = null;
+
+  function enableProtection(){
+    if (protectionEnabled) return;
+    protectionEnabled = true;
+
+    // 1) Inject CSS that disables text selection for most elements,
+    // but allows inputs, textareas and contenteditable to work.
+    const css = `
+      /* Prevent selection/copy on most elements, but allow user inputs */
+      :not(input):not(textarea):not([contenteditable="true"]) {
+        -webkit-user-select: none !important;
+        -moz-user-select: none !important;
+        -ms-user-select: none !important;
+        user-select: none !important;
+      }
+      /* Prevent dragging of images/links */
+      img, a { -webkit-user-drag: none !important; user-drag: none !important; }
+    `;
+    protectStyleEl = document.createElement('style');
+    protectStyleEl.setAttribute('data-vk-protect','');
+    protectStyleEl.textContent = css;
+    document.head.appendChild(protectStyleEl);
+
+    // 2) Event listeners: contextmenu, copy, cut, paste, dragstart
+    document.addEventListener('contextmenu', preventIfProtected, true);
+    document.addEventListener('copy', preventIfProtected, true);
+    document.addEventListener('cut', preventIfProtected, true);
+    document.addEventListener('paste', preventIfProtected, true);
+    document.addEventListener('dragstart', preventIfProtected, true);
+    document.addEventListener('selectstart', preventIfProtected, true);
+
+    // 3) Block many keyboard shortcuts that can copy/save/inspect
+    document.addEventListener('keydown', keyBlocker, true);
+
+    // 4) Prevent programmatic selection by clearing selection changes
+    document.addEventListener('selectionchange', selectionGuard, true);
+
+    // 5) MutationObserver to re-add style/listeners if someone removes them
+    observer = new MutationObserver(function(mutations){
+      // if protect style removed re-add
+      if (!document.head.contains(protectStyleEl)) {
+        try { document.head.appendChild(protectStyleEl); } catch(e){}
+      }
+    });
+    observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+
+    // 6) Periodic healing in case someone removes listeners/styles from console
+    healInterval = setInterval(() => {
+      if (protectStyleEl && !document.head.contains(protectStyleEl)) {
+        try { document.head.appendChild(protectStyleEl); } catch(e){}
+      }
+    }, 1000);
+
+    // console note
+    console.info('VK Protection: enabled (client-side).');
+  }
+
+  function disableProtection(){
+    protectionEnabled = false;
+    try {
+      if (protectStyleEl && document.head.contains(protectStyleEl)) protectStyleEl.remove();
+    } catch(e){}
+    document.removeEventListener('contextmenu', preventIfProtected, true);
+    document.removeEventListener('copy', preventIfProtected, true);
+    document.removeEventListener('cut', preventIfProtected, true);
+    document.removeEventListener('paste', preventIfProtected, true);
+    document.removeEventListener('dragstart', preventIfProtected, true);
+    document.removeEventListener('selectstart', preventIfProtected, true);
+    document.removeEventListener('keydown', keyBlocker, true);
+    document.removeEventListener('selectionchange', selectionGuard, true);
+    if (observer) { try { observer.disconnect(); } catch(e){} observer = null; }
+    if (healInterval) { clearInterval(healInterval); healInterval = null; }
+    console.info('VK Protection: disabled.');
+  }
+
+  // Prevent handler for several events
+  function preventIfProtected(e){
+    if (!protectionEnabled) return;
+    // allow copy/paste inside inputs/areas: if event target is input/textarea/contenteditable, allow
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    try { e.preventDefault(); e.stopImmediatePropagation && e.stopImmediatePropagation(); } catch(err){}
+  }
+
+  // selection guard: if user selects outside input/area, clear it
+  function selectionGuard(){
+    if (!protectionEnabled) return;
+    const sel = document.getSelection && document.getSelection();
+    if (!sel) return;
+    if (sel.isCollapsed) return;
+    // if selection anchor node inside input/textarea/contenteditable => allow
+    try {
+      const node = sel.anchorNode;
+      if (!node) { sel.removeAllRanges(); return; }
+      const el = (node.nodeType === 1) ? node : node.parentElement;
+      if (!el) { sel.removeAllRanges(); return; }
+      if (el.closest && (el.closest('input') || el.closest('textarea') || el.closest('[contenteditable="true"]'))) {
+        return;
+      }
+    } catch(e){}
+    try { sel.removeAllRanges(); } catch(e){}
+  }
+
+  // Key blocker: blocks F1-F12, Ctrl/Cmd combinations for copy/save/inspect/print etc.
+  function keyBlocker(e){
+    if (!protectionEnabled) return;
+    const key = (e.key || '').toLowerCase();
+    const ctrl = e.ctrlKey || false;
+    const shift = e.shiftKey || false;
+    const alt = e.altKey || false;
+    const meta = e.metaKey || false; // Command (Mac)
+
+    // Block Function keys F1-F12
+    if (/^f\d{1,2}$/.test(key)) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+
+    // Common blocked combos
+    const blocked =
+      (ctrl && key === 'c') || (meta && key === 'c') || // copy
+      (ctrl && key === 'x') || (meta && key === 'x') || // cut
+      (ctrl && key === 'v') || (meta && key === 'v') || // paste
+      (ctrl && key === 's') || (meta && key === 's') || // save
+      (ctrl && key === 'p') || (meta && key === 'p') || // print
+      (ctrl && key === 'u') || // view source
+      (ctrl && shift && key === 'i') || // devtools
+      (ctrl && shift && key === 'c') || // inspect
+      (ctrl && shift && key === 'j') || // console
+      (ctrl && key === 'a') || (meta && key === 'a') || // select all
+      (ctrl && key === 'f') || (meta && key === 'f'); // find
+
+    if (blocked) {
+      // allow if focused in input/textarea/contenteditable
+      const active = document.activeElement;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      return;
+    }
+  }
+
+  /* ---------- Unlock flow (overlay) ---------- */
+  function tryUnlock(){
+    const input = pwdInput();
+    if (!input) return;
+    const val = (input.value || '').trim();
+    if (val === ADMIN_PASS) {
+      // Hide overlay, then enable protection on page
+      if (overlay) overlay.style.display = 'none';
+      enableProtection();
+    } else {
+      // wrong password feedback
+      input.value = '';
+      input.focus();
+      const panel = document.getElementById('vk_lock_panel');
+      try { panel.animate([{transform:'translateX(0)'},{transform:'translateX(-8px)'},{transform:'translateX(8px)'},{transform:'translateX(0)'}],{duration:260}); } catch(e){}
+    }
+  }
+
+  // Attach unlock handlers (retry until elements available)
+  function attachUnlockHandlers(){
+    const input = pwdInput();
+    const btn = unlockBtn();
+    if (input && btn) {
+      btn.addEventListener('click', tryUnlock);
+      input.addEventListener('keydown', function(e){ if (e.key === 'Enter') tryUnlock(); });
+    } else {
+      setTimeout(attachUnlockHandlers, 100);
+    }
+  }
+  attachUnlockHandlers();
+
+  /* ---------- Expose API for debugging/testing ---------- */
+  window.vkLock = window.vkLock || {};
+  window.vkLock.protect = enableProtection;
+  window.vkLock.unprotect = disableProtection;
+  window.vkLock.hideLock = function(){ if (overlay) overlay.style.display = 'none'; enableProtection(); };
+  window.vkLock.showLock = function(){ if (overlay) overlay.style.display = 'flex'; disableProtection(); };
+
+  console.info('VK Lock initialized. Demo password: "demo123". After unlock, page protection will be enabled (client-side).');
+
+  /* ---------- Final safety reminder in-console ---------- */
+  console.warn('Reminder: Client-side copy-blocking is NOT foolproof. Users can still screenshot, use OCR, disable JS, or remove protections via devtools. For robust protection use server-side gating, DRM, or managed kiosk mode.');
+})();
+</script>
+
+
+
+
+
+  
 </html>
